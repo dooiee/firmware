@@ -1,0 +1,20 @@
+# .gitignore file
+
+# Microcontroller folders
+**/ESP32-RF-Transmitter/main/debug_custom.json
+**/ESP32-RF-Transmitter/main/debug.cfg
+**/ESP32-RF-Transmitter/main/esp32.svd
+**/ESP32-RF-Transmitter/main/secrets.h
+**/MKR-1010-Central-Hub/main/secrets.h
+**/MKR-1010-Water-Quality-Monitor/main/config.h
+**/Nano-33-IoT-Central-Hub/main/config.h
+
+# .vscode and .build folders
+**/.vscode/
+**/.build/
+
+# DS_Store files
+**/.DS_Store
+
+# any secrets.h files
+**/secrets.h
