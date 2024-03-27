@@ -1,5 +1,7 @@
-#ifndef CONFIG_H
-#define CONFIG_H
+#ifndef CONFIG_TEMPLATE_H
+#define CONFIG_TEMPLATE_H
+
+/* A template for the config.h file. Copy this file to config.h and fill in the values. */
 
 // Bluetooth configuration 
 // replace with your own UUID values here:
@@ -12,4 +14,4 @@ const char* turbidityVoltageCharacteristicUuid = "";
 const char* waterLevelCharacteristicUuid = "";
 const char* pHCharacteristicUuid = "";
 
-#endif // CONFIG_H
+#endif // CONFIG_TEMPLATE_H
