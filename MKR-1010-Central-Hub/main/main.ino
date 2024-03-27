@@ -1,8 +1,5 @@
 /*
 TODO: 
-- add debug patches to Firebase to indicate if "PeripheralConnected", "ErrorMessages", etc.
-- add feature so server is only connected if Nano is receiving data
-- modify server reconnection function to timeout after a certain amount of time so it does not hang
 - add way to reset the ESP32 (start FB stream and relay command to Nano who will send command to MKR WiFi 1010)
 - maybe add timestamp to Firebase indicating when last bootup was
 - maybe add failure method when RTC fails to set
@@ -40,6 +37,8 @@ TODO:
 // #Defines
 #define DEBUG (false) // Set to true to enable debug output for SSL
 
+#define SERVER_PORT 80
+
 // MKR 1010 ETH shield and board config
 byte mac[] = SECRET_ETH_SHIELD_MAC;
 IPAddress ip(SECRET_MKR_1010_IP);
@@ -72,6 +71,9 @@ byte packetBuffer[NTP_PACKET_SIZE]; //buffer to hold incoming and outgoing packe
 // A UDP instance to let us send and receive packets over UDP
 EthernetUDP Udp;
 
+// Initialize the Ethernet server object to listen for incoming connections (from the iOS app)
+EthernetServer server(SERVER_PORT);
+
 // declare an RTC object
 RTCZero rtc;
 
@@ -86,6 +88,7 @@ const char* firebaseDebugErrorMessagesDataPath = "/Debug/ErrorMessage.json";
 
 // flag to check if the program is starting up. If so, don't send data.
 bool isStartingUp = true;
+bool recentlyDisconnected = false; // Tracks if we've recently disconnected
 
 
 void setup() {
@@ -129,27 +132,95 @@ void setup() {
   setOnBoardLEDColor(0, 0, 255, LED_INTENSITY_HIGH); // blue
   delay(500);
   setOnBoardLEDColor(0, 0, 255, LED_INTENSITY_HIGH); // blue
-  delay(500);
-  setOnBoardLEDColor(0, 0, 0, LED_INTENSITY_HIGH); // off
+
+  // Start the server
+  server.begin();
+  Serial.print("Server is at ");
+  Serial.println(Ethernet.localIP());
 }
 
 void loop() {
   // read any incoming data from the server: (server disconects, etc.)
-  readServerResponse();
-      
-  // if the server's disconnected, stop the client:
-  if (!client.connected()) {
-    // set on-board LED to yellow
-    setOnBoardLEDColor(255, 255, 0, LED_INTENSITY_HIGH); // yellow
-    reconnectToServer();
+  if (client.connected()) {
+    readServerResponse();
   }
 
-  if (Serial1.available() /* maybe add > 0 */) {
+  if (Serial1.available() > 0) {
+    // Reset the disconnection flag if there's incoming data
+    recentlyDisconnected = false; 
+
+    // if (!client.connected()) {
+    //   // set on-board LED to yellow
+    //   setOnBoardLEDColor(255, 255, 0, LED_INTENSITY_HIGH); // yellow
+    //   reconnectToServer();
+    // }
     // Read and process data from the Nano 33 IoT and send to Firebase 
     processSensorDataFromNano();
   }
-}
 
+  // if the server's disconnected, stop the client:
+  if (!client.connected() && !recentlyDisconnected) {
+    // set on-board LED to yellow
+    setOnBoardLEDColor(255, 0, 0, LED_INTENSITY_HIGH); // red
+    disconnectFromServer();
+
+    // Mark that we've handled the disconnection
+    recentlyDisconnected = true;
+  }
+
+  // Check if the server is available
+  EthernetClient localClient = server.available(); // Listen for incoming clients
+  if (localClient) {
+    Serial.println("New Client.");
+    bool currentLineIsBlank = true;
+    String currentLine = "";
+    String requestPath = ""; // Store the request path
+    bool requestLineParsed = false;
+    
+    while (localClient.connected()) {
+      if (localClient.available()) {
+        char c = localClient.read();
+        Serial.write(c); // Echo the received character to the Serial Monitor
+        if (!requestLineParsed) {
+          if (c == '\n' || c == '\r') {
+            requestLineParsed = true; // Mark that we've finished parsing the request line
+            int firstSpace = currentLine.indexOf(' ');
+            int secondSpace = currentLine.indexOf(' ', firstSpace + 1);
+            if (firstSpace != -1 && secondSpace != -1) {
+              requestPath = currentLine.substring(firstSpace + 1, secondSpace); // Extract the path
+            }
+            currentLine = ""; // Reset currentLine for the next lines
+          } else {
+            currentLine += c; // Build the request line
+          }
+        }
+
+        if (c == '\n' && currentLineIsBlank) {
+          if (requestPath == "/status") {
+            respondWithLEDStatus(localClient);
+          } else {
+            // Respond with a 404 Not Found error for unrecognized paths
+            localClient.println("HTTP/1.1 404 Not Found");
+            localClient.println("Content-Type: text/plain");
+            localClient.println("Connection: close");
+            localClient.println();
+            localClient.println("Error: Not Found");
+          }
+          break; // Break out of the loop once the response has been sent
+        } else if (c == '\n') {
+          // We've got text on the current line, check if it's the next line
+          currentLineIsBlank = true;
+        } else if (c != '\r') {
+          // We've got text on the current line
+          currentLineIsBlank = false;
+        }
+      }
+    }
+    // Close the client connection
+    localClient.stop();
+    Serial.println("Client Disconnected.");
+  }
+}
 
 void establishSerialConnectionWithNano() {
   unsigned long lastAttemptTime = 0;
@@ -379,77 +450,6 @@ bool connectToServer() {
   }
 }
 
-// bool connectToServer() {
-//   Serial.print("Connecting to ");
-//   Serial.println(firebaseHost);
-
-//   unsigned long retryDelay = 500; // Start with a half-second delay
-//   const unsigned long maxRetryDelay = 60000; // Maximum delay of 60 seconds
-//   bool isConnected = false;
-//   int attemptCount = 0;
-//   const int maxAttempts = 5; // Maximum number of connection attempts
-
-//   while (!isConnected && attemptCount < maxAttempts) {
-//     auto start = millis();
-//     // Attempt to connect
-//     if (client.connect(firebaseHost, 443)) {
-//       // If connection is successful
-//       auto time = millis() - start;
-//       Serial.print("Connected! Took: ");
-//       Serial.print(time);
-//       Serial.println("ms");
-//       setOnBoardLEDColor(0, 255, 0, LED_INTENSITY_HIGH); // Set LED to green
-//       isConnected = true; // Exit loop on successful connection
-//     } else {
-//       // If connection fails
-//       Serial.print("Connection failed. Attempt ");
-//       Serial.print(attemptCount + 1);
-//       Serial.println(" of 5.");
-//       setOnBoardLEDColor(255, 255, 0, LED_INTENSITY_HIGH); // Set LED to yellow to indicate retry
-
-//       delay(retryDelay); // Wait before retrying
-//       retryDelay *= 2; // Exponential backoff for the next retry attempt
-//       if (retryDelay > maxRetryDelay) {
-//         retryDelay = maxRetryDelay; // Cap the retry delay
-//       }
-//     }
-//     attemptCount++;
-//   }
-
-//   if (!isConnected) {
-//     // If unable to connect after all attempts
-//     Serial.println("Unable to connect after multiple attempts.");
-//     setOnBoardLEDColor(255, 0, 0, LED_INTENSITY_HIGH); // Set LED to red to indicate failure
-//     return false;
-//   }
-
-//   return true;
-// }
-
-
-// void reconnectToServer() {
-//   Serial.println("\nReconnecting to server...");
-//   // if you get a connection, report back via serial:
-//   auto start = millis();
-//   if (client.connect(firebaseHost, 443)) {
-//     // Handle connection success
-//     Serial.println("Reconnected to server!");
-//     auto time = millis() - start;
-//     Serial.print("Took: ");
-//     Serial.print(time);
-//     Serial.println("ms");
-//     // flicker onboard LED green 
-//     setOnBoardLEDColor(0, 255, 0, LED_INTENSITY_HIGH); // green
-//     delay(1000);
-//     setOnBoardLEDColor(0, 0, 0, LED_INTENSITY_HIGH); // off    
-//   } else {
-//     // Handle connection failure
-//     Serial.println("Reconnection failed.");
-//     setOnBoardLEDColor(255, 0, 0, LED_INTENSITY_HIGH); // red
-//     // Perform some error handling or retry logic
-//   }
-// }
-
 void reconnectToServer() {
   Serial.println("\nReconnecting to server...");
 
@@ -473,8 +473,6 @@ void reconnectToServer() {
       setOnBoardLEDColor(0, 255, 0, LED_INTENSITY_HIGH); // green
       delay(1000);
       setOnBoardLEDColor(0, 255, 0, LED_INTENSITY_HIGH); // green
-      delay(1000);
-      setOnBoardLEDColor(0, 0, 0, LED_INTENSITY_HIGH); // off
       connected = true;
     } else {
       // Handle connection failure
@@ -513,7 +511,6 @@ void reconnectToServer() {
   }
 }
 
-
 // TODO: Perhaps can add other use cases here and simply read updateType to properly handle dataPath and jsonPayload
 void processSensorDataFromNano() {
   StaticJsonDocument<256> jsonPayload;
@@ -537,6 +534,13 @@ void processSensorDataFromNano() {
   Serial.println("Received JSON payload:");
   serializeJsonPretty(jsonPayload, Serial);
   Serial.println();
+
+  // if the server's disconnected, stop the client:
+  if (!client.connected()) {
+    // set on-board LED to yellow
+    setOnBoardLEDColor(255, 255, 0, LED_INTENSITY_HIGH); // yellow
+    reconnectToServer();
+  }
 
   // Read the value at the "type" key to determine if the data is a realtime update or a log entry
   const char* updateType = jsonPayload["type"];
@@ -764,6 +768,24 @@ void sendPutRequest(const char* path, const char* data) {
   processServerResponse();
 }
 
+void respondWithLEDStatus(EthernetClient& localClient) {
+    int red, green, blue, intensity;
+    getOnBoardLEDColor(&red, &green, &blue, &intensity); // Fetch the current LED status
+
+    // Construct JSON string
+    String jsonResponse = "{\"red\":" + String(red) + ",\"green\":" + String(green) + ",\"blue\":" + String(blue) + ",\"intensity\":" + String(intensity) + "}";
+    Serial.println("Sending LED status response: " + jsonResponse);
+
+    // Send HTTP headers
+    localClient.println("HTTP/1.1 200 OK");
+    localClient.println("Content-Type: application/json"); // Indicate the response type is JSON
+    localClient.println("Connection: close");  // The connection will be closed after completion of the response
+    localClient.println();  // End of HTTP headers
+
+    // Send the JSON response
+    localClient.println(jsonResponse);
+}
+
 void disconnectFromServer() {
   endMicros = micros();
   Serial.println();
@@ -780,9 +802,5 @@ void disconnectFromServer() {
   Serial.print(" kbytes/second");
   Serial.println();
 
-  // do nothing forevermore (for now):
-  while (true) {
-    setOnBoardLEDColor(255, 0, 0, LED_INTENSITY_HIGH);
-    delay(1);
-  }
+  setOnBoardLEDColor(255, 0, 0, LED_INTENSITY_HIGH); // red
 }

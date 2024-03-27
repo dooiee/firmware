@@ -19,7 +19,13 @@
 #define LED_INTENSITY_BRIGHT 224
 #define LED_INTENSITY_MAX 255
 
+extern int currentRed;
+extern int currentGreen;
+extern int currentBlue;
+extern int currentIntensity;
+
 // Function to set the RGB color and brightness of the LED
+void getOnBoardLEDColor(int* red, int* green, int* blue, int* intensity);
 void setOnBoardLEDColor(int red, int green, int blue, int intensity);
 void fadeOnBoardLedColor(int red, int green, int blue, int intensity, int fadeDuration);
 void setLedColorForCode(const int* colorCode, int intensity);

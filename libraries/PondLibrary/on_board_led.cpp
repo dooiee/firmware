@@ -1,5 +1,26 @@
 #include "on_board_led.h"
 
+// Global variables to store the current LED color and intensity
+int currentRed = 0;
+int currentGreen = 0;
+int currentBlue = 0;
+int currentIntensity = 0;
+
+/**
+ * Get the RGB color and brightness of the on-board LED of the MKR WiFi 1010
+ * @param red The red intensity of the LED (0-255)
+ * @param green The green intensity of the LED (0-255)
+ * @param blue The blue intensity of the LED (0-255)
+ * @param intensity The brightness of the LED (0-255)
+ */
+void getOnBoardLEDColor(int* red, int* green, int* blue, int* intensity) {
+   // Directly return the stored values of the current LED state
+  *red = currentRed;
+  *green = currentGreen;
+  *blue = currentBlue;
+  *intensity = currentIntensity;
+}
+
 /**
 * Set the RGB color and brightness of the on-board LED of the MKR WiFi 1010
 * @param red The red intensity of the LED (0-255)
@@ -9,15 +30,15 @@
 */
 void setOnBoardLEDColor(int red, int green, int blue, int intensity) {
   // Ensure the input values are within the valid range
-  red = constrain(red, LED_INTENSITY_MIN, LED_INTENSITY_MAX);
-  green = constrain(green, LED_INTENSITY_MIN, LED_INTENSITY_MAX);
-  blue = constrain(blue, LED_INTENSITY_MIN, LED_INTENSITY_MAX);
-  intensity = constrain(intensity, LED_INTENSITY_MIN, LED_INTENSITY_MAX);
+  currentRed = constrain(red, LED_INTENSITY_MIN, LED_INTENSITY_MAX);
+  currentGreen = constrain(green, LED_INTENSITY_MIN, LED_INTENSITY_MAX);
+  currentBlue = constrain(blue, LED_INTENSITY_MIN, LED_INTENSITY_MAX);
+  currentIntensity = constrain(intensity, LED_INTENSITY_MIN, LED_INTENSITY_MAX);
 
   // Set the LED color and brightness
-  WiFiDrv::analogWrite(LED_RED, red * intensity / LED_INTENSITY_MAX);
-  WiFiDrv::analogWrite(LED_GREEN, green * intensity / LED_INTENSITY_MAX);
-  WiFiDrv::analogWrite(LED_BLUE, blue * intensity / LED_INTENSITY_MAX);
+  WiFiDrv::analogWrite(LED_RED, currentRed * currentIntensity / LED_INTENSITY_MAX);
+  WiFiDrv::analogWrite(LED_GREEN, currentGreen * currentIntensity / LED_INTENSITY_MAX);
+  WiFiDrv::analogWrite(LED_BLUE, currentBlue * currentIntensity / LED_INTENSITY_MAX);
 }
 
 /**
