@@ -25,6 +25,9 @@
 #include <ArduinoBLE.h>
 #include <ArduinoJson.h>
 
+// #Defines
+#define DEBUG (false) // Set to true to enable debug output
+
 // Global variables to store the sensor data to calculate average values over a 1 minute interval
 const int MAX_SENSOR_VALUES = 60; // The maximum number of sensor values to store in the arrays
 
@@ -44,11 +47,23 @@ const int NUM_SENSORS = 6; // change this if you add/remove sensors
 int numValues[NUM_SENSORS] = {0, 0, 0, 0, 0, 0}; // The number of values stored for each sensor
 int currentIndex[NUM_SENSORS] = {0, 0, 0, 0, 0, 0}; // The current index for each sensor's array
 
+bool isPeripheralConnected = false;
+unsigned long lastConnectionTime = 0; // Store the last connection time in milliseconds
+const unsigned long peripheralTimeout = 15000; // 15 seconds
+int lastRssi = 0; // Global variable to store the last RSSI reading
 
 void setup() {
     // initialize serial communication
-    Serial.begin(115200);
-    Serial.println("\nSerial port connected.");
+    if (DEBUG) {
+      Serial.begin(115200);
+      while (!Serial) {
+        ; // Wait for the serial port connection, for debugging purposes.
+      }
+      Serial.println("\nSerial port connected.");
+    } else {
+      Serial.begin(115200);
+      Serial.println("\nSerial port ready.");
+    }
     Serial.print("Software version: v");
     Serial.println(RELEASE_VERSION);
 
@@ -86,19 +101,89 @@ void loop() {
       Serial.print(peripheral.advertisedServiceUuid());
       Serial.println();
 
+      // Update connection status
+      isPeripheralConnected = true;
+      lastConnectionTime = millis();
+
+      // Update the RSSI value
+      lastRssi = peripheral.rssi();
+      Serial.print("RSSI: ");
+      Serial.println(lastRssi);
+
       // read peripheral data and send it to the main board
       streamPeripheralData(peripheral);
       
       // resume scanning
       BLE.scanForName(peripheralName);
     }
+  } else {
+    // Check if the peripheral is still connected
+    if (isPeripheralConnected && millis() - lastConnectionTime >= peripheralTimeout) {
+      Serial.println("Peripheral disconnected.");
+      isPeripheralConnected = false;
+    }
+  }
+
+  // Handle incoming commands from the MKR central hub
+  if (Serial1.available()) {
+    String command = Serial1.readStringUntil('\n');
+    command.trim(); // Remove any whitespace or newline characters
+
+    // Handling various commands
+    if (command == "READY_TO_CONNECT") {
+      Serial1.println("NANO_CONNECTED");
+      Serial.println("Connection with MKR established.");
+    } else if (command == "STATUS") {
+      sendStatus();
+    } else if (command == "RECONNECT") {
+      // Reconnect to the peripheral device
+      BLE.scanForName(peripheralName);
+      Serial.println("Scanning for peripheral...");
+    } else if (command.startsWith("CALIBRATE_PH")) {
+      // Parse calibration values from the command
+      int firstComma = command.indexOf(',');
+      int secondComma = command.indexOf(',', firstComma + 1);
+
+      if (firstComma != -1 && secondComma != -1) {
+        String lowCal = command.substring(13, firstComma); // start after "CALIBRATE_PH "
+        String midCal = command.substring(firstComma + 1, secondComma);
+        String highCal = command.substring(secondComma + 1);
+
+        // Now you can convert these String values to floats if needed:
+        float lowCalValue = lowCal.toFloat();
+        float midCalValue = midCal.toFloat();
+        float highCalValue = highCal.toFloat();
+
+        // Assuming you are connected to the peripheral
+        updatePhCalibrationCharacteristic(lowCalValue, midCalValue, highCalValue);
+      } else {
+        Serial.println("Invalid calibration command format.");
+        Serial1.println("ERROR: Invalid calibration command format");
+      }
+    }
+    else {
+      Serial.print("Unknown command received: ");
+      Serial.println(command);
+      
+      // Send an error message back to the MKR board
+      Serial1.println("ERROR: Unknown command");
+    }
   }
 }
-
 
 void establishSerialConnectionWithMKR() {
   // wait for connection message from MKR
   while (true) {
+    // Check if debug command is received
+    if (Serial.available()) {
+      String command = Serial.readStringUntil('\n');
+      command.trim();
+      if (command == "DEBUG") {
+        Serial.println("Debug mode enabled, skipping connection with MKR.");
+        return;
+      }
+    }
+
     if (Serial1.available()) {
       String received = Serial1.readStringUntil('\n');
       received.trim(); // remove any leading/trailing white space or special characters
@@ -121,6 +206,49 @@ void establishSerialConnectionWithMKR() {
         break;
       }
     }
+  }
+}
+
+void sendStatus() {
+  // Create the status JSON payload
+  StaticJsonDocument<256> jsonPayload;
+  jsonPayload["type"] = "status";  // type field so MKR can route properly
+  jsonPayload["connected"] = isPeripheralConnected;
+  if (isPeripheralConnected) {
+    jsonPayload["rssi"] = lastRssi;
+  } else {
+    // Calculate the time since the last connection in seconds
+    unsigned long timeSinceLastConnection = (millis() - lastConnectionTime) / 1000;
+    jsonPayload["timeSinceLastConnection"] = timeSinceLastConnection;
+  }
+
+  serializeJson(jsonPayload, Serial1);
+  Serial1.println();
+}
+
+void updatePhCalibrationCharacteristic(float lowCal, float midCal, float highCal) {
+  // Assuming BLE peripheral is already connected and characteristic discovered
+  BLEDevice peripheral; // You should have this from your connection logic
+  BLECharacteristic pHCalibrationCharacteristic = peripheral.characteristic(pHCalibrationCharacteristicUuid);
+
+  if (pHCalibrationCharacteristic) {
+    Serial.println("Found pH Calibration Characteristic. Updating values...");
+    
+    // Prepare the data packet - ensure it matches the expected format on the peripheral
+    char calibData[20]; // Adjust size based on your specific needs
+    snprintf(calibData, sizeof(calibData), "%f,%f,%f", lowCal, midCal, highCal);
+    
+    // Write new calibration data to the characteristic
+    if (pHCalibrationCharacteristic.writeValue(calibData)) {
+      Serial.println("Calibration values updated successfully.");
+      Serial1.println("CALIBRATION_SUCCESS");
+    } else {
+      Serial.println("Failed to update calibration values.");
+      Serial1.println("ERROR: Calibration update failed");
+    }
+  } else {
+    Serial.println("pH Calibration Characteristic not found.");
+    Serial1.println("ERROR: pH Characteristic not found");
   }
 }
 
