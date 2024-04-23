@@ -64,7 +64,7 @@ void setup() {
   Serial.printf("Firebase Client v%s\n\n", FIREBASE_CLIENT_VERSION);
 
   // Connect to WiFi network
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  WiFi.begin(SECRET_SSID, SECRET_PASS);
   Serial.print("Connecting to Wi-Fi");
   while (WiFi.status() != WL_CONNECTED)
   {
@@ -82,10 +82,10 @@ void setup() {
   rfTransmitter.setPulseLength(390);
 
   // Or use legacy authenticate method
-  config.database_url = DATABASE_URL;
+  config.database_url = SECRET_DATABASE_URL;
   config.signer.test_mode = true;
 //   config.api_key = DATABASE_API_KEY;
-  config.signer.tokens.legacy_token = DATABASE_API_KEY;
+  config.signer.tokens.legacy_token = SECRET_DATABASE_SECRET;
   
   Serial.printf("Begin Firebase with config and auth...\n");
   Firebase.begin(&config, &auth);

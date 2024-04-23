@@ -248,6 +248,14 @@ void loop() {
     Serial.println(central.address());
   }
 
+  // If not connected, ensure the device is still advertising for new connections
+  if (!central.connected()) {
+    if (!BLE.advertising()) {
+      BLE.advertise();
+      Serial.println("Restarting advertising after disconnection.");
+    }
+  }
+
   // Kick the watchdog to reset the timer
   Watchdog.reset();
 }

@@ -25,6 +25,9 @@
 #include <ArduinoBLE.h>
 #include <ArduinoJson.h>
 
+// #Defines
+#define DEBUG (false) // Set to true to enable debug output and fake data generation
+
 // Global variables to store the sensor data to calculate average values over a 1 minute interval
 const int MAX_SENSOR_VALUES = 60; // The maximum number of sensor values to store in the arrays
 
@@ -44,11 +47,15 @@ const int NUM_SENSORS = 6; // change this if you add/remove sensors
 int numValues[NUM_SENSORS] = {0, 0, 0, 0, 0, 0}; // The number of values stored for each sensor
 int currentIndex[NUM_SENSORS] = {0, 0, 0, 0, 0, 0}; // The current index for each sensor's array
 
+bool isPeripheralConnected = false;
+unsigned long lastConnectionTime = 0; // Store the last connection time in milliseconds
+const unsigned long peripheralTimeout = 15000; // 15 seconds
+int lastRssi = 0; // Global variable to store the last RSSI reading
 
 void setup() {
     // initialize serial communication
     Serial.begin(115200);
-    Serial.println("\nSerial port connected.");
+    Serial.println("\nSerial port ready.");
     Serial.print("Software version: v");
     Serial.println(RELEASE_VERSION);
 
@@ -59,6 +66,13 @@ void setup() {
     establishSerialConnectionWithMKR();
     Serial.println("Serial1 connected to MKR WiFi 1010!");
 
+    if (DEBUG)
+    {
+      Serial.println("Debug mode enabled. Skipping BLE initialization.");
+      delay(10000); // Delay for 10 seconds to allow the MKR board to bootup
+      return;
+    }
+    
     // initialize BLE communication
     if (!BLE.begin()) {
       Serial.println("Starting BLE failed!");
@@ -72,33 +86,116 @@ void setup() {
 }
 
 void loop() {
-  BLEDevice peripheral = BLE.available();
+  if (DEBUG) {
+    // Simulate sensor data read and send it every few seconds
+    static unsigned long lastFakeDataTime = 0;
+    if (millis() - lastFakeDataTime > 3000) {
+      generateAndAppendFakeSensorData();
+      lastFakeDataTime = millis();
+      isPeripheralConnected = true;
+      lastConnectionTime = millis();
+      lastRssi = generateRandomValue(-100, -50);
+    }
+  }
+  else {
+    BLEDevice peripheral = BLE.available();
 
-  if (peripheral) {
-    if (peripheral.localName() == peripheralName) {
-      // stop scanning
-      BLE.stopScan();
-      Serial.print("Found: ");
-      Serial.print(peripheral.address());
-      Serial.print(" '");
-      Serial.print(peripheral.localName());
-      Serial.print("' ");
-      Serial.print(peripheral.advertisedServiceUuid());
-      Serial.println();
+    if (peripheral) {
+      if (peripheral.localName() == peripheralName) {
+        // stop scanning
+        BLE.stopScan();
+        Serial.print("Found: ");
+        Serial.print(peripheral.address());
+        Serial.print(" '");
+        Serial.print(peripheral.localName());
+        Serial.print("' ");
+        Serial.print(peripheral.advertisedServiceUuid());
+        Serial.println();
 
-      // read peripheral data and send it to the main board
-      streamPeripheralData(peripheral);
-      
-      // resume scanning
+        // Update connection status
+        isPeripheralConnected = true;
+        lastConnectionTime = millis();
+
+        // Update the RSSI value
+        lastRssi = peripheral.rssi();
+        Serial.print("RSSI: ");
+        Serial.println(lastRssi);
+
+        // read peripheral data and send it to the main board
+        streamPeripheralData(peripheral);
+        
+        // resume scanning
+        BLE.scanForName(peripheralName);
+      }
+    } else {
+      // Check if the peripheral is still connected
+      if (isPeripheralConnected && millis() - lastConnectionTime >= peripheralTimeout) {
+        Serial.println("Peripheral disconnected.");
+        isPeripheralConnected = false;
+      }
+    }
+  }
+
+  // Handle incoming commands from the MKR central hub
+  if (Serial1.available()) {
+    String command = Serial1.readStringUntil('\n');
+    command.trim(); // Remove any whitespace or newline characters
+
+    // Handling various commands
+    if (command == "READY_TO_CONNECT") {
+      Serial1.println("NANO_CONNECTED");
+      Serial.println("Connection with MKR established.");
+    } else if (command == "STATUS") {
+      sendStatus();
+    } else if (command == "RECONNECT") {
+      // Reconnect to the peripheral device
       BLE.scanForName(peripheralName);
+      Serial.println("Scanning for peripheral...");
+    } else if (command.startsWith("CALIBRATE_PH")) {
+      // Parse calibration values from the command
+      int firstComma = command.indexOf(',');
+      int secondComma = command.indexOf(',', firstComma + 1);
+
+      if (firstComma != -1 && secondComma != -1) {
+        String lowCal = command.substring(13, firstComma); // start after "CALIBRATE_PH "
+        String midCal = command.substring(firstComma + 1, secondComma);
+        String highCal = command.substring(secondComma + 1);
+
+        // Now you can convert these String values to floats if needed:
+        float lowCalValue = lowCal.toFloat();
+        float midCalValue = midCal.toFloat();
+        float highCalValue = highCal.toFloat();
+
+        // Assuming you are connected to the peripheral
+        updatePhCalibrationCharacteristic(lowCalValue, midCalValue, highCalValue);
+      } else {
+        Serial.println("Invalid calibration command format.");
+        Serial1.println("ERROR: Invalid calibration command format");
+      }
+    }
+    else {
+      Serial.print("Unknown command received: ");
+      Serial.println(command);
+      
+      // Send an error message back to the MKR board
+      Serial1.println("ERROR: Unknown command");
     }
   }
 }
 
-
 void establishSerialConnectionWithMKR() {
   // wait for connection message from MKR
   while (true) {
+    // Check if debug command is received
+    if (Serial.available()) {
+      String command = Serial.readStringUntil('\n');
+      command.trim();
+      if (command == "DEBUG") {
+        Serial.println("Debug mode enabled, skipping connection with MKR.");
+        return;
+      }
+    }
+
     if (Serial1.available()) {
       String received = Serial1.readStringUntil('\n');
       received.trim(); // remove any leading/trailing white space or special characters
@@ -121,6 +218,49 @@ void establishSerialConnectionWithMKR() {
         break;
       }
     }
+  }
+}
+
+void sendStatus() {
+  // Create the status JSON payload
+  StaticJsonDocument<256> jsonPayload;
+  jsonPayload["type"] = "status";  // type field so MKR can route properly
+  jsonPayload["connected"] = isPeripheralConnected;
+  if (isPeripheralConnected) {
+    jsonPayload["rssi"] = lastRssi;
+  } else {
+    // Calculate the time since the last connection in seconds
+    unsigned long timeSinceLastConnection = (millis() - lastConnectionTime) / 1000;
+    jsonPayload["timeSinceLastConnection"] = timeSinceLastConnection;
+  }
+
+  serializeJson(jsonPayload, Serial1);
+  Serial1.println();
+}
+
+void updatePhCalibrationCharacteristic(float lowCal, float midCal, float highCal) {
+  // Assuming BLE peripheral is already connected and characteristic discovered
+  BLEDevice peripheral; // You should have this from your connection logic
+  BLECharacteristic pHCalibrationCharacteristic = peripheral.characteristic(pHCalibrationCharacteristicUuid);
+
+  if (pHCalibrationCharacteristic) {
+    Serial.println("Found pH Calibration Characteristic. Updating values...");
+    
+    // Prepare the data packet - ensure it matches the expected format on the peripheral
+    char calibData[20]; // Adjust size based on your specific needs
+    snprintf(calibData, sizeof(calibData), "%f,%f,%f", lowCal, midCal, highCal);
+    
+    // Write new calibration data to the characteristic
+    if (pHCalibrationCharacteristic.writeValue(calibData)) {
+      Serial.println("Calibration values updated successfully.");
+      Serial1.println("CALIBRATION_SUCCESS");
+    } else {
+      Serial.println("Failed to update calibration values.");
+      Serial1.println("ERROR: Calibration update failed");
+    }
+  } else {
+    Serial.println("pH Calibration Characteristic not found.");
+    Serial1.println("ERROR: pH Characteristic not found");
   }
 }
 
@@ -170,7 +310,7 @@ void sendLogUpdate() {
   StaticJsonDocument<256> jsonPayload;
 
   // Set the log type
-  jsonPayload["type"] = "log";
+  jsonPayload["type"] = DEBUG ? "log-debug" : "log";
 
   // Calculate the averages
   jsonPayload["temperature"] = average(temperatureValues, numValues[0]);
@@ -269,7 +409,6 @@ bool streamPeripheralData(BLEDevice peripheral) {
           jsonPayload[sensorKey] = sensorValue;
           appendSensorValue(i, sensorValue);
         }
-
       }
     }
 
@@ -291,4 +430,59 @@ bool streamPeripheralData(BLEDevice peripheral) {
   peripheral.disconnect();
   Serial.println("Peripheral disconnected.");
   return true;
+}
+
+template <typename T>
+T generateRandomValue(T lowerBound, T upperBound) {
+    T range = upperBound - lowerBound;
+    T randomValue = static_cast<T>(rand()) / static_cast<T>(RAND_MAX);
+    return lowerBound + randomValue * range;
+}
+
+void generateAndAppendFakeSensorData() {
+    StaticJsonDocument<256> jsonPayload;
+    jsonPayload["type"] = "realtime-debug";
+
+    for (int i = 0; i < NUM_SENSORS; i++) {
+      switch (i) {
+        case 0: // Temperature
+            temperatureValues[currentIndex[i]] = generateRandomValue<float>(45.0, 55.0);
+            jsonPayload["temperature"] = temperatureValues[currentIndex[i]];
+            break;
+        case 1: // Water Level
+            waterLevelValues[currentIndex[i]] = generateRandomValue<float>(0.0, 12.0);
+            jsonPayload["waterLevel"] = waterLevelValues[currentIndex[i]];
+            break;
+        case 2: // Turbidity
+            turbidityValues[currentIndex[i]] = generateRandomValue<int>(0, 3000);
+            jsonPayload["turbidity"] = turbidityValues[currentIndex[i]];
+            break;
+        case 3: // Turbidity Voltage
+            turbidityVoltageValues[currentIndex[i]] = generateRandomValue<float>(0.0, 3.3);
+            jsonPayload["turbidityVoltage"] = turbidityVoltageValues[currentIndex[i]];
+            break;
+        case 4: // Total Dissolved Solids
+            totalDissolvedSolidsValues[currentIndex[i]] = generateRandomValue<int>(50, 300);
+            jsonPayload["totalDissolvedSolids"] = totalDissolvedSolidsValues[currentIndex[i]];
+            break;
+        case 5: // pH
+            pHValues[currentIndex[i]] = generateRandomValue<float>(6.0, 8.0);
+            jsonPayload["pH"] = pHValues[currentIndex[i]];
+            break;
+      }
+      numValues[i]++;  // Ensure we increment the count of values collected for averaging
+      currentIndex[i] = (currentIndex[i] + 1) % MAX_SENSOR_VALUES;
+    }
+
+    // Transmit the JSON payload to the MKR board
+    Serial.println("Transmitting REALTIME DEBUG data to main board...");
+    transmitDataToMkrBoard(jsonPayload);
+
+    // Check if it's time to send a data log update to the main board
+    unsigned long currentTime = millis();
+    if (currentTime - lastDataLogSent >= dataLogInterval) {
+      sendLogUpdate();
+      // Update the lastDataLogSent variable
+      lastDataLogSent = currentTime;
+    }
 }
