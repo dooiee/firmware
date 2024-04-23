@@ -50,7 +50,7 @@ const int rand_pin = A5;
 // We input an EthernetClient, our trust anchors, and the analog pin
 EthernetClient base_client;
 #if DEBUG
-SSLClient firebaseClient(base_client, TAs, (size_t)TAs_NUM, rand_pin, 1, SSLClient::SSL_INFO);
+SSLClient firebaseClient(base_client, TAs, (size_t)TAs_NUM, rand_pin, 1, SSLClient::SSL_DUMP);
 #else
 SSLClient firebaseClient(base_client, TAs, (size_t)TAs_NUM, rand_pin);
 #endif
@@ -81,6 +81,7 @@ const char firebaseHost[] = SECRET_DATABASE_URL;
 // global paths to upload realtime + log sensor data and debug data to Firebase
 const char* firebaseRealtimeDataPath = "/CurrentConditions.json";
 const char* firebaseLogSensorDataPath = "/Log/SensorData.json";
+const char* firebaseDebugLogSensorDataPath = "/Debug/Log/SensorData.json";
 const char* firebaseDebugBLEConnectivityDataPath = "/Debug/PeripheralConnected.json";
 const char* firebaseDebugErrorMessagesDataPath = "/Debug/ErrorMessage.json";
 
@@ -162,22 +163,27 @@ void loop() {
   // read any incoming data from the server: (server disconects, etc.)
   if (firebaseClient.connected()) {
     readServerResponse();
+  } else {
+    if (handleDisconnection()) {
+      return; // Exit the loop to avoid further processing if disconnected
+    }
   }
 
   if (Serial1.available() > 0) {
-    // Reset the disconnection flag if there's incoming data
-    recentlyDisconnected = false; 
-
     // Read and process data from the Nano 33 IoT and route correctly
     processSensorDataFromNano(localClient);
   }
+}
 
-  // if the server's disconnected, stop the client:
+bool handleDisconnection() {
   if (!firebaseClient.connected() && !recentlyDisconnected) {
-    setOnBoardLEDColor(255, 0, 0, LED_INTENSITY_HIGH); // red
+    setOnBoardLEDColor(255, 0, 0, LED_INTENSITY_HIGH); // Red
+    Serial.println("Server disconnected... Main loop");
     disconnectFromServer();
     recentlyDisconnected = true;
+    return true;  // Indicate that a disconnection was handled
   }
+  return false;  // No disconnection was handled
 }
 
 bool readRequestPath(EthernetClient& client, String& requestPath, String& queryString) {
@@ -225,56 +231,6 @@ bool readRequestPath(EthernetClient& client, String& requestPath, String& queryS
   }
   return requestLineParsed;
 }
-
-// bool readRequestPath(EthernetClient& client, String& requestPath, String& queryString) {
-//   bool currentLineIsBlank = true;
-//   String currentLine = "";
-//   bool requestLineParsed = false;
-
-//   while (client.available()) {
-//       char c = client.read();
-//       Serial.write(c); // Echo to serial monitor for debugging
-
-//       if (!requestLineParsed) {
-//           if (c == '\n' || c == '\r') {
-//               requestLineParsed = true;
-//               Serial.print("Parsing Request Line: '"); // Debug output for seeing the full line
-//               Serial.print(currentLine);
-//               Serial.println("'");
-
-//               int firstSpace = currentLine.indexOf(' ');
-//               int secondSpace = currentLine.indexOf(' ', firstSpace + 1);
-//               if (firstSpace != -1 && secondSpace != -1) {
-//                   requestPath = currentLine.substring(firstSpace + 1, secondSpace);
-//                   int questionMark = requestPath.indexOf('?');
-//                   if (questionMark != -1) {
-//                       queryString = requestPath.substring(questionMark + 1);
-//                       requestPath = requestPath.substring(0, questionMark);
-//                   }
-//                   Serial.print("Request Path: '"); Serial.print(requestPath);
-//                   Serial.print("', Query String: '"); Serial.print(queryString); Serial.println("'");
-//                   return true; // Path successfully parsed
-//               }
-//           } else {
-//               currentLine += c;
-//           }
-//       }
-
-//       // Reset the currentLine for the next read
-//       if (c == '\n') {
-//           if (currentLineIsBlank) {
-//               Serial.println("Received an empty line, indicating the end of headers.");
-//               break; // Empty line means end of the headers
-//           }
-//           currentLine = ""; // Start a new line
-//           currentLineIsBlank = true;
-//       } else if (c != '\r') {
-//           currentLineIsBlank = false; // We have text on the current line
-//       }
-//   }
-//   Serial.println("Request not properly parsed or incomplete request received.");
-//   return false; // Return false if no path was parsed
-// }
 
 void handleClientRequests(EthernetClient& client) {
   uint8_t socketNum = client.getSocketNumber();
@@ -633,6 +589,10 @@ void reconnectToServer() {
   while (!connected && attempt < 5) { // Limit the number of attempts
     auto start = millis();
     int result = firebaseClient.connect(firebaseHost, 443);
+    Serial.print("Connection attempt ");
+    Serial.print(attempt + 1);
+    Serial.print(": ");
+    Serial.println(result);
 
     if (result) {
       // Handle connection success
@@ -643,9 +603,9 @@ void reconnectToServer() {
       Serial.println("ms");
       // Flicker onboard LED green
       setOnBoardLEDColor(0, 255, 0, LED_INTENSITY_HIGH); // green
-      delay(1000);
-      setOnBoardLEDColor(0, 255, 0, LED_INTENSITY_HIGH); // green
       connected = true;
+      Serial.println("Connected on attempt " + String(attempt + 1) + ".");
+      Serial.println("connected: " + String(connected));
     } else {
       // Handle connection failure
       Serial.println("Reconnection failed. Attempting again...");
@@ -681,6 +641,7 @@ void reconnectToServer() {
     // Perform a system reset
     NVIC_SystemReset();
   }
+  Serial.println("Reconnection successful. Continuing...");
 }
 
 void processSensorDataFromNano(EthernetClient& localClient) {
@@ -712,18 +673,22 @@ void processSensorDataFromNano(EthernetClient& localClient) {
   // Determine the correct data path based on the "type" key value
   if (strcmp(updateType, "status") == 0) {
       respondWithStatus(localClient, jsonPayload);
-  } else if (strcmp(updateType, "realtime") == 0) {
+  } else if (strcmp(updateType, "realtime") == 0 || strcmp(updateType, "realtime-debug") == 0) {
     // if the server's disconnected, stop the client:
     if (!firebaseClient.connected()) {
       reconnectToServer();
+      Serial.println("Reconnected to server. Sending sensor data...");
+      recentlyDisconnected = false; // Reset flag on successful reconnection
     }
     sendJsonPatchRequest(firebaseRealtimeDataPath, jsonPayload);
-  } else if (strcmp(updateType, "log") == 0) {
-    // if the server's disconnected, stop the client:
+  } else if (strcmp(updateType, "log") == 0 || strcmp(updateType, "log-debug") == 0) {
+    const char* firebasePath = (strcmp(updateType, "log") == 0) ? firebaseLogSensorDataPath : firebaseDebugLogSensorDataPath;
     if (!firebaseClient.connected()) {
       reconnectToServer();
+      Serial.println("Reconnected to server. Sending log data...");
+      recentlyDisconnected = false; // Reset flag on successful reconnection
     }
-    handleLogType(jsonPayload);
+    handleLogType(firebasePath, jsonPayload);
   } else {
     Serial.println("Invalid update type. Ignoring data.");
     return;
@@ -734,20 +699,20 @@ void respondWithStatus(EthernetClient& client, const JsonDocument& jsonPayload) 
   uint8_t socketNum = client.getSocketNumber();
 
   if (client.connected()) {
-      client.println("HTTP/1.1 200 OK");
-      client.println("Content-Type: application/json");
-      client.println("Connection: close");
-      client.println();
-      serializeJson(jsonPayload, client);
-      client.stop();  // Close the client connection
-      Serial.println("Sent status response: ");
-      serializeJsonPretty(jsonPayload, Serial);
-      Serial.println();
-      markSocketAsFree(socketNum);
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-Type: application/json");
+    client.println("Connection: close");
+    client.println();
+    serializeJson(jsonPayload, client);
+    client.stop();  // Close the client connection
+    Serial.println("Sent status response: ");
+    serializeJsonPretty(jsonPayload, Serial);
+    Serial.println();
+    markSocketAsFree(socketNum);
   }
 }
 
-void handleLogType(const JsonDocument& jsonPayload) {
+void handleLogType(const char* path, const JsonDocument& jsonPayload) {
     StaticJsonDocument<256> jsonToSend;
     unsigned long epoch = rtc.getEpoch();
     jsonToSend[String(epoch)] = jsonPayload;
@@ -755,7 +720,7 @@ void handleLogType(const JsonDocument& jsonPayload) {
     JsonObject timestampObj = jsonToSend[String(epoch)].createNestedObject("timestamp");
     timestampObj[".sv"] = "timestamp";
 
-    sendJsonPatchRequest(firebaseLogSensorDataPath, jsonToSend);
+    sendJsonPatchRequest(path, jsonToSend);
 }
 
 void readServerResponse() {
@@ -769,6 +734,8 @@ void readServerResponse() {
     }
     byteCount = byteCount + len;
   }
+  // Optional: Add a delay to ensure the request has completed
+  delay(100);
 }
 
 void processServerResponse() {
@@ -819,7 +786,7 @@ void sendJsonPatchRequest(const char* path, const StaticJsonDocument<256>& jsonP
   // serializeJson(jsonPayload, firebaseClient); // can possibly use this instead of the above code
 
   // Process the response
-  processServerResponse();
+  // processServerResponse();
 }
 
 /// Checks if the data is a number or a string and creates corresponding JSON payload syntax
@@ -866,7 +833,7 @@ void sendPatchRequest(const char* path, const char* key, const String& data) {
   firebaseClient.println(payload);
 
   // Process the response
-  processServerResponse();
+  // processServerResponse();
 }
 
 void sendGetRequest(const char* path) {
@@ -882,7 +849,7 @@ void sendGetRequest(const char* path) {
   firebaseClient.println();
 
   // process the response
-  processServerResponse();
+  // processServerResponse();
 }
 
 // Overloaded sendGetRequest function to handle and return the response to pass elsewhere
@@ -919,7 +886,7 @@ void sendPutRequest(const char* path, const char* data) {
   firebaseClient.println(data);
 
   // process the response
-  processServerResponse();
+  // processServerResponse();
 }
 
 void respondWithLEDStatus(EthernetClient& localClient) {
