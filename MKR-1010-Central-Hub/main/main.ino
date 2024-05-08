@@ -1,12 +1,4 @@
 /*
-TODO: 
-- add way to reset the ESP32 (start FB stream and relay command to Nano who will send command to MKR WiFi 1010)
-- maybe add timestamp to Firebase indicating when last bootup was
-- maybe add failure method when RTC fails to set
-- maybe add ability to only start up Firebase server connection if Nano detects data from peripheral
-*/
-
-/*
   This sketch will perform the following functions:
   - Connect to the internet via Ethernet
   - On boot up, connect to an NTP server and set the RTC
@@ -25,8 +17,9 @@ TODO:
 #include <SSLClient.h>
 #include <EthernetUdp.h>
 #include <RTCZero.h>
-#include "certificates.h"
+#include <Adafruit_SleepyDog.h>
 
+#include "certificates.h"
 #include "helpers.h"
 #include "version.h"
 #include "secrets.h"
@@ -88,6 +81,7 @@ const char* firebaseDebugErrorMessagesDataPath = "/Debug/ErrorMessage.json";
 bool recentlyDisconnected = false; // Tracks if we've recently disconnected
 static unsigned long lastDisconnectTime = 0;  // Timestamp of the last disconnect
 const unsigned long disconnectDelay = 15000;  // Delay before trying to reconnect, in milliseconds
+int watchdogTimeoutInterval = 30000; // 30 seconds
 
 bool socketsInUse[MAX_SOCK_NUM] = {false}; // MAX_SOCK_NUM is defined in EthernetLarge.h
 
@@ -139,6 +133,10 @@ void setup() {
   display_freeram();  // Display free RAM before attempting to connect
   }
 
+  // Initialize the watchdog with an interval of 30 seconds
+  Watchdog.enable(watchdogTimeoutInterval);
+
+  // Connect to the Firebase server
   if (!connectToServer()) {
     Serial.println(F("Connection to server failed."));
     setOnBoardLEDColor(255, 0, 0, LED_INTENSITY_HIGH); // red
@@ -154,6 +152,9 @@ void setup() {
 
   Serial.println(F("Checking for data from Nano33IoT..."));
   setOnBoardLEDColor(0, 0, 255, LED_INTENSITY_HIGH); // blue
+
+  // Kick the watchdog
+  Watchdog.reset();
 }
 
 void loop() {
@@ -199,6 +200,9 @@ void loop() {
       }
     }
   }
+
+  // Kick the watchdog to reset the timer
+  Watchdog.reset();
 }
 
 int freeRam() {
@@ -636,6 +640,9 @@ void reconnectToServer() {
   int attempt = 0;
 
   while (!connected && attempt < 5) { // Limit the number of attempts
+    // Kick the watchdog to reset the timer
+    Watchdog.reset();
+
     auto start = millis();
     int result = firebaseClient.connect(firebaseHost, 443);
     display_freeram();  // Display free RAM after attempting to reconnect
@@ -653,6 +660,7 @@ void reconnectToServer() {
       Serial.println(F("Connected."));
       // Serial.println("Connected on attempt " + String(attempt + 1) + ".");
     } else {
+      Watchdog.reset();
       // Handle connection failure
       Serial.println(F("Reconnection failed. Attempting again..."));
       setOnBoardLEDColor(255, 0, 0, LED_INTENSITY_HIGH); // red
@@ -665,7 +673,20 @@ void reconnectToServer() {
         Serial.println(firebaseClient.getWriteError());
       }
 
-      delay(retryDelay);
+      if (retryDelay >= watchdogTimeoutInterval) {
+        // Split the delay into smaller chunks
+        unsigned long delayTime = retryDelay;
+        while (delayTime > 0) {
+            unsigned long chunk = min(delayTime, 10000); // Kick the watchdog every 10 seconds
+            delay(chunk);
+            Watchdog.reset();
+            delayTime -= chunk;
+        }
+      } else {
+        delay(retryDelay);
+        Watchdog.reset();
+      }
+
       retryDelay *= 2; // Exponential backoff
       if (retryDelay > maxRetryDelay) {
         retryDelay = maxRetryDelay;
@@ -677,10 +698,6 @@ void reconnectToServer() {
   if (!connected) {
     Serial.println(F("Failed to reconnect after multiple attempts."));
     setOnBoardLEDColor(255, 0, 0, LED_INTENSITY_HIGH); // red
-    delay(500);
-    setOnBoardLEDColor(255, 0, 0, LED_INTENSITY_HIGH); // red
-    delay(500);
-    setOnBoardLEDColor(255, 0, 0, LED_INTENSITY_HIGH); // red
     delay(5000);
     setOnBoardLEDColor(0, 0, 0, LED_INTENSITY_HIGH); // off
 
@@ -688,6 +705,8 @@ void reconnectToServer() {
     NVIC_SystemReset();
   } else {
     display_freeram();  // Display free RAM after successful connection
+    // Kick the watchdog to reset the timer
+    Watchdog.reset();
   }
 }
 

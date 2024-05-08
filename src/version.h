@@ -5,6 +5,6 @@
 // ran the commands 'cd /path/to/{REPLACE-WITH-SPECIFIC-BOARD}/main' followed by `ln -s ../../src/version.h version.h` to create the symlinks
 
 // Variable to store the release version of the software running on the MCUs
-#define RELEASE_VERSION "2.1.0" 
+#define RELEASE_VERSION "2.1.1" 
 
 #endif // VERSION_H
