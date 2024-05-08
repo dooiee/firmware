@@ -12,7 +12,7 @@ extern "C"
  * Index:    0
  * Label:    GlobalSign Root CA
  * Subject:  CN=GlobalSign Root CA,OU=Root CA,O=GlobalSign nv-sa,C=BE
- * Domain(s): {MY_PROJECT_NAME}.firebaseio.com
+ * Domain(s): firebase.google.com
  */
 
 #define TAs_NUM 1

@@ -85,11 +85,15 @@ const char* firebaseDebugLogSensorDataPath = "/Debug/Log/SensorData.json";
 const char* firebaseDebugBLEConnectivityDataPath = "/Debug/PeripheralConnected.json";
 const char* firebaseDebugErrorMessagesDataPath = "/Debug/ErrorMessage.json";
 
-// flag to check if the program is starting up. If so, don't send data.
-bool isStartingUp = true;
 bool recentlyDisconnected = false; // Tracks if we've recently disconnected
+static unsigned long lastDisconnectTime = 0;  // Timestamp of the last disconnect
+const unsigned long disconnectDelay = 15000;  // Delay before trying to reconnect, in milliseconds
 
 bool socketsInUse[MAX_SOCK_NUM] = {false}; // MAX_SOCK_NUM is defined in EthernetLarge.h
+
+extern "C" char* sbrk(int incr);
+int freeRam();
+void display_freeram();
 
 void setup() {
   Ethernet.init(5);   // MKR ETH shield
@@ -100,14 +104,15 @@ void setup() {
     while (!Serial) {
       ; // Wait for the serial port connection, for debugging purposes.
     }
-    Serial.println("\nSerial port connected.");
+    Serial.println(F("\nSerial port connected."));
+    Serial.println("Software version: v" + String(RELEASE_VERSION) + "_debug");
   } else {
     Serial.begin(115200);
-    Serial.println("\nSerial port ready.");
+    Serial.println(F("\nSerial port ready."));
+    Serial.print(F("Software version: v"));
+    Serial.println(RELEASE_VERSION);
   }
-  Serial.print("Software version: v");
-  Serial.println(RELEASE_VERSION);
-
+  
   Serial1.begin(115200);
   establishSerialConnectionWithNano();
 
@@ -127,19 +132,27 @@ void setup() {
 
   // Start the server
   server.begin();
-  Serial.print("Server is at ");
+  Serial.print(F("Server is at "));
   Serial.println(Ethernet.localIP());
 
+  if (DEBUG) {
+  display_freeram();  // Display free RAM before attempting to connect
+  }
+
   if (!connectToServer()) {
-    Serial.println("Connection to server failed.");
+    Serial.println(F("Connection to server failed."));
     setOnBoardLEDColor(255, 0, 0, LED_INTENSITY_HIGH); // red
     while (1);
+  }
+
+  if (DEBUG) {
+    display_freeram();  // Display free RAM after attempting to connect
   }
 
   // time measurement for data transfer rate during server connection
   beginMicros = micros();
 
-  Serial.println("\nChecking for data from Nano33IoT...");
+  Serial.println(F("Checking for data from Nano33IoT..."));
   setOnBoardLEDColor(0, 0, 255, LED_INTENSITY_HIGH); // blue
 }
 
@@ -165,20 +178,49 @@ void loop() {
     readServerResponse();
   } else {
     if (handleDisconnection()) {
+      lastDisconnectTime = millis();  // Update the last disconnect time
+      flushSerial1(); // Flush any incoming serial data immediately after disconnection
       return; // Exit the loop to avoid further processing if disconnected
     }
   }
 
   if (Serial1.available() > 0) {
-    // Read and process data from the Nano 33 IoT and route correctly
-    processSensorDataFromNano(localClient);
+    // Ensure a delay has passed before reconnecting
+    if (millis() - lastDisconnectTime > disconnectDelay) {
+      // Read and process data from the Nano 33 IoT and route correctly
+      processSensorDataFromNano(localClient);
+    } else {
+      flushSerial1(); // disregard incoming nano data during delay period
+      // lets keep checking if our firebase connection is closed successfully
+      if (firebaseClient.m_soft_connected(__func__)) {
+        Serial.println(F("Soft check failed: SSL connection was not closed properly."));
+      } else {
+        // Serial.println(F("SSL connection closed properly."));
+      }
+    }
+  }
+}
+
+int freeRam() {
+  char top;
+  return &top - reinterpret_cast<char*>(sbrk(0));
+}
+
+void display_freeram(){
+  Serial.print(F("- SRAM left: "));
+  Serial.println(freeRam());
+  Serial.println((int)sbrk(0));
+}
+
+void flushSerial1() {
+  while (Serial1.available() > 0) {
+      Serial1.read(); // Read and discard the incoming byte
   }
 }
 
 bool handleDisconnection() {
   if (!firebaseClient.connected() && !recentlyDisconnected) {
     setOnBoardLEDColor(255, 0, 0, LED_INTENSITY_HIGH); // Red
-    Serial.println("Server disconnected... Main loop");
     disconnectFromServer();
     recentlyDisconnected = true;
     return true;  // Indicate that a disconnection was handled
@@ -352,7 +394,7 @@ void establishSerialConnectionWithNano() {
   unsigned long lastAttemptTime = 0;
   const unsigned long attemptInterval = 1000; // half second
 
-  Serial.println("Establishing handshake with Nano 33 IoT...");
+  Serial.println(F("Establishing handshake with Nano 33 IoT..."));
   // keep sending connection message to Nano until we receive a response
   while (true) {
     // Check if debug command is received
@@ -360,14 +402,14 @@ void establishSerialConnectionWithNano() {
       String command = Serial.readStringUntil('\n');
       command.trim();
       if (command == "DEBUG") {
-        Serial.println("Debug mode enabled, skipping connection with Nano.");
+        Serial.println(F("Debug mode enabled, skipping connection with Nano."));
         return;
       }
     }
 
     // if enough time has passed since the last attempt
     if (millis() - lastAttemptTime >= attemptInterval) {
-      Serial.println("Sending READY_TO_CONNECT to Nano... ");
+      Serial.println(F("Sending READY_TO_CONNECT to Nano... "));
       // save the current time
       lastAttemptTime = millis();
       // send connection message to Nano
@@ -380,7 +422,7 @@ void establishSerialConnectionWithNano() {
       received.trim(); // remove any leading/trailing white space or special characters
       Serial.println("\tReceived: " + received); // Print any received message
       if (received == "NANO_CONNECTED") {
-        Serial.println("Serial connection with Nano established!");
+        Serial.println(F("Serial connection with Nano established!"));
         return;
       }
     }
@@ -389,22 +431,22 @@ void establishSerialConnectionWithNano() {
 
 void connectToEthernet() {
   if (Ethernet.begin(mac) == 0) {
-    Serial.println("Failed to configure Ethernet using DHCP");
+    Serial.println(F("Failed to configure Ethernet using DHCP"));
     // Check for Ethernet hardware present
     if (Ethernet.hardwareStatus() == EthernetNoHardware) {
-      Serial.println("Ethernet shield was not found.  Sorry, can't run without hardware. :(");
+      Serial.println(F("Ethernet shield was not found.  Sorry, can't run without hardware. :("));
       setOnBoardLEDColor(255, 0, 0, LED_INTENSITY_HIGH); // red
       while (true) {
         delay(1); // do nothing, no point running without Ethernet hardware
       }
     }
     if (Ethernet.linkStatus() == LinkOFF) {
-      Serial.println("Ethernet cable is not connected.");
+      Serial.println(F("Ethernet cable is not connected."));
     }
     // try to configure using IP address instead of DHCP:
     Ethernet.begin(mac, ip, myDns);
   } else {
-    Serial.print("Ethernet connected. DCHP assigned IP:");
+    Serial.print(F("Ethernet connected. DCHP assigned IP:"));
     Serial.println(Ethernet.localIP());
   }
 }
@@ -436,9 +478,9 @@ void setRTCFromNTPServer() {
   rtc.begin();
 
   // get a random server from the pool
-  Serial.println("Beginning UDP...");
+  Serial.println(F("Beginning UDP..."));
   Udp.begin(localPort);
-  Serial.print("Local port: ");
+  Serial.print(F("Local port: "));
   Serial.println(Udp.localPort());
   setOnBoardLEDColor(255, 255, 0, LED_INTENSITY_HIGH); // yellow
 
@@ -447,14 +489,16 @@ void setRTCFromNTPServer() {
   bool packetReceived = false;
 
   for(int attempt = 0; attempt < maxAttempts && !packetReceived; attempt++) {
+    int waitTime = attempt == 0 ? 0 : 4000; // 5000ms initially, 4000ms after the first attempt
+    delay(waitTime);
     // send an NTP packet to a time server
-    sendNTPpacket(timeServer); 
+    sendNTPpacket(timeServer);
 
     // wait to see if a reply is available (must be > 4 seconds to resist a denial of service)
-    delay(5000);
+    delay(1000);
 
     if (Udp.parsePacket()) {
-      Serial.println("Received NTP packet!");
+      Serial.println(F("Received NTP packet!"));
       packetReceived = true;
 
       // We've received a packet, read the data from it
@@ -469,7 +513,7 @@ void setRTCFromNTPServer() {
       unsigned long secsSince1900 = highWord << 16 | lowWord;
 
       // now convert NTP time into everyday time:
-      Serial.print("Unix time = ");
+      Serial.print(F("Unix time = "));
       // Unix time starts on Jan 1 1970. In seconds, that's 2208988800:
       const unsigned long seventyYears = 2208988800UL;
       // subtract seventy years:
@@ -484,9 +528,9 @@ void setRTCFromNTPServer() {
       setOnBoardLEDColor(0, 255, 255, LED_INTENSITY_HIGH); // cyan
     } 
     else {
-      Serial.print("Attempt ");
+      Serial.print(F("Attempt "));
       Serial.print(attempt + 1);
-      Serial.println(" to receive NTP packet failed.");
+      Serial.println(F(" to receive NTP packet failed."));
       setOnBoardLEDColor(255, 0, 255, LED_INTENSITY_HIGH); // purple
     }
   }
@@ -494,12 +538,12 @@ void setRTCFromNTPServer() {
   // Close the UDP socket whether NTP sync was successful or not
   Udp.stop();
   if (!packetReceived) {
-    Serial.println("No NTP packet received after maximum attempts. Fetching server timestamp from Firebase.");
+    Serial.println(F("No NTP packet received after maximum attempts. Fetching server timestamp from Firebase."));
     setOnBoardLEDColor(255, 165, 0, LED_INTENSITY_HIGH); // orange
 
     // Connect to the Firebase server
     if (!connectToServer()) {
-      Serial.println("Connection to Firebase server failed.");
+      Serial.println(F("Connection to Firebase server failed."));
       setOnBoardLEDColor(255, 0, 0, LED_INTENSITY_HIGH); // red
       while (1); // halt execution if connection fails
     }
@@ -555,30 +599,35 @@ void processFirebaseTimestampResponse() {
 
 bool connectToServer() {
   // connect to the server
-  Serial.print("Connecting to ");
+  Serial.print(F("Connecting to "));
   Serial.print(firebaseHost);
-  Serial.println(" ...");
+  Serial.println(F(" ..."));
 
   // if you get a connection, report back via serial:
   auto start = millis();
   // specify the server and port, 443 is the standard port for HTTPS
   if (firebaseClient.connect(firebaseHost, 443)) {
     auto time = millis() - start;
-    Serial.print("Took: ");
+    Serial.print(F("Took: "));
     Serial.print(time);
-    Serial.println("ms");
+    Serial.println(F("ms"));
     setOnBoardLEDColor(0, 255, 0, LED_INTENSITY_HIGH); // green
     return true;
   } else {
     // if you didn't get a connection to the server:
-    Serial.println("Connection failed");
+    Serial.println(F("Connection failed"));
     setOnBoardLEDColor(255, 0, 0, LED_INTENSITY_HIGH); // red
     return false;
   }
 }
 
 void reconnectToServer() {
-  Serial.println("\nReconnecting to server...");
+  // Check if we are actually closed before trying
+  if (firebaseClient.m_soft_connected(__func__)) {
+    Serial.println(F("Soft check failed: SSL connection was not closed properly."));
+  }
+
+  Serial.println(F("\nReconnecting to server..."));
   setOnBoardLEDColor(255, 255, 0, LED_INTENSITY_HIGH); // yellow
 
   unsigned long retryDelay = 2000; // Start with a 3-second delay
@@ -589,33 +638,30 @@ void reconnectToServer() {
   while (!connected && attempt < 5) { // Limit the number of attempts
     auto start = millis();
     int result = firebaseClient.connect(firebaseHost, 443);
-    Serial.print("Connection attempt ");
-    Serial.print(attempt + 1);
-    Serial.print(": ");
-    Serial.println(result);
+    display_freeram();  // Display free RAM after attempting to reconnect
 
     if (result) {
       // Handle connection success
       auto time = millis() - start;
-      Serial.println("Reconnected to server!");
-      Serial.print("Took: ");
+      Serial.println(F("Reconnected to server!"));
+      Serial.print(F("Took: "));
       Serial.print(time);
-      Serial.println("ms");
+      Serial.println(F("ms"));
       // Flicker onboard LED green
       setOnBoardLEDColor(0, 255, 0, LED_INTENSITY_HIGH); // green
       connected = true;
-      Serial.println("Connected on attempt " + String(attempt + 1) + ".");
-      Serial.println("connected: " + String(connected));
+      Serial.println(F("Connected."));
+      // Serial.println("Connected on attempt " + String(attempt + 1) + ".");
     } else {
       // Handle connection failure
-      Serial.println("Reconnection failed. Attempting again...");
+      Serial.println(F("Reconnection failed. Attempting again..."));
       setOnBoardLEDColor(255, 0, 0, LED_INTENSITY_HIGH); // red
 
       // Log the specific SSL error if possible
       if (firebaseClient.getWriteError() == SSLClient::SSL_CLIENT_CONNECT_FAIL) {
-        Serial.println("SSL Connection failed. Check internet connection and SSL settings.");
+        Serial.println(F("SSL Connection failed. Check internet connection and SSL settings."));
       } else if (firebaseClient.getWriteError() != 0) {
-        Serial.print("SSL Error Code: ");
+        Serial.print(F("SSL Error Code: "));
         Serial.println(firebaseClient.getWriteError());
       }
 
@@ -629,7 +675,7 @@ void reconnectToServer() {
   }
 
   if (!connected) {
-    Serial.println("Failed to reconnect after multiple attempts.");
+    Serial.println(F("Failed to reconnect after multiple attempts."));
     setOnBoardLEDColor(255, 0, 0, LED_INTENSITY_HIGH); // red
     delay(500);
     setOnBoardLEDColor(255, 0, 0, LED_INTENSITY_HIGH); // red
@@ -640,8 +686,9 @@ void reconnectToServer() {
 
     // Perform a system reset
     NVIC_SystemReset();
+  } else {
+    display_freeram();  // Display free RAM after successful connection
   }
-  Serial.println("Reconnection successful. Continuing...");
 }
 
 void processSensorDataFromNano(EthernetClient& localClient) {
@@ -655,16 +702,19 @@ void processSensorDataFromNano(EthernetClient& localClient) {
   else if (error) {
     // this oftentimes occurs when the input is empty (inbetween sensor readings)
     // use this case to catch that and not send unnecessary data to Firebase
-    Serial.print(F("\ndeserializeJson() failed: "));
-    Serial.println(error.c_str());
+    // Serial.print(F("\ndeserializeJson() failed: "));
+    // Serial.println(error.c_str());
     return;
   }
   
   // Print the received JSON object in a human-readable format
-  Serial.println("Data received from Nano 33 IoT!");
-  Serial.println("Received JSON payload:");
+  Serial.println(F("Data received from Nano 33 IoT!"));
+  Serial.println(F("Received JSON payload:"));
   serializeJsonPretty(jsonPayload, Serial);
   Serial.println();
+
+  Serial.print(F("JSON Object Size: "));
+  Serial.println(measureJson(jsonPayload));
 
   // Read the value at the "type" key to route data correctly
   const char* updateType = jsonPayload["type"];
@@ -674,23 +724,33 @@ void processSensorDataFromNano(EthernetClient& localClient) {
   if (strcmp(updateType, "status") == 0) {
       respondWithStatus(localClient, jsonPayload);
   } else if (strcmp(updateType, "realtime") == 0 || strcmp(updateType, "realtime-debug") == 0) {
+    Serial.println(F("Hi!"));
     // if the server's disconnected, stop the client:
     if (!firebaseClient.connected()) {
+      display_freeram();  // Display free RAM before attempting to reconnect
       reconnectToServer();
-      Serial.println("Reconnected to server. Sending sensor data...");
+      display_freeram();  // Display free RAM after attempting to reconnect
+      Serial.println(F("Reconnected to server. Sending sensor data..."));
       recentlyDisconnected = false; // Reset flag on successful reconnection
+      return;
     }
+    Serial.println(F("Hello!"));
+    // freeRam before sending data
+    display_freeram();
     sendJsonPatchRequest(firebaseRealtimeDataPath, jsonPayload);
+    // freeRam after sending data
+    display_freeram();
+    Serial.println(F("Sent realtime data to Firebase."));
   } else if (strcmp(updateType, "log") == 0 || strcmp(updateType, "log-debug") == 0) {
     const char* firebasePath = (strcmp(updateType, "log") == 0) ? firebaseLogSensorDataPath : firebaseDebugLogSensorDataPath;
     if (!firebaseClient.connected()) {
       reconnectToServer();
-      Serial.println("Reconnected to server. Sending log data...");
+      Serial.println(F("Reconnected to server. Sending log data..."));
       recentlyDisconnected = false; // Reset flag on successful reconnection
     }
     handleLogType(firebasePath, jsonPayload);
   } else {
-    Serial.println("Invalid update type. Ignoring data.");
+    Serial.println(F("Invalid update type. Ignoring data."));
     return;
   }
 }
@@ -724,30 +784,50 @@ void handleLogType(const char* path, const JsonDocument& jsonPayload) {
 }
 
 void readServerResponse() {
-  int len = firebaseClient.available();
-  if (len > 0) {
-    byte buffer[80];
-    if (len > 80) len = 80;
-    firebaseClient.read(buffer, len);
-    if (printWebData) {
-      Serial.write(buffer, len); // show in the serial monitor (slows some boards)
+  // check again if we are actually connected here
+  if (!firebaseClient.m_soft_connected(__func__)) {
+    Serial.println(F("Soft check failed: SSL connection was not closed properly."));
+  } else {
+    // Read all the lines of the reply from server and print them to Serial
+    size_t byteCount = 0;
+    while (firebaseClient.available()) {
+      size_t len = firebaseClient.available();
+      byte buffer[80];
+      if (len > 80) len = 80;
+      firebaseClient.read(buffer, len);
+      if (printWebData) {
+        Serial.write(buffer, len);
+      }
+      byteCount += len;
     }
-    byteCount = byteCount + len;
+    // Optional: Add a delay to ensure the request has completed
+    delay(100);
+
+    // int len = firebaseClient.available();
+    // if (len > 0) {
+    //   byte buffer[80];
+    //   if (len > 80) len = 80;
+    //   firebaseClient.read(buffer, len);
+    //   if (printWebData) {
+    //     Serial.write(buffer, len); // show in the serial monitor (slows some boards)
+    //   }
+    //   byteCount = byteCount + len;
+    // }
+    // // Optional: Add a delay to ensure the request has completed
+    // delay(100);
   }
-  // Optional: Add a delay to ensure the request has completed
-  delay(100);
 }
 
 void processServerResponse() {
-  // Wait for the server to respond
-  unsigned long timeout = millis();
-  while (firebaseClient.available() == 0) {
-    if (millis() - timeout > 5000) {
-      Serial.println(">>> Client Timeout !");
-      firebaseClient.stop();
-      return;
-    }
-  }
+  // // Wait for the server to respond
+  // unsigned long timeout = millis();
+  // while (firebaseClient.available() == 0) {
+  //   if (millis() - timeout > 5000) {
+  //     Serial.println(">>> Client Timeout !");
+  //     firebaseClient.stop();
+  //     return;
+  //   }
+  // }
   // Read all the lines of the reply from server and print them to Serial
   size_t byteCount = 0;
   while (firebaseClient.available()) {
@@ -765,28 +845,44 @@ void processServerResponse() {
 }
 
 void sendJsonPatchRequest(const char* path, const StaticJsonDocument<256>& jsonPayload) {
-  String payload;
-  serializeJson(jsonPayload, payload);
+  Serial.println(F("Serializing JSON payload..."));
+  Serial.print(F("Free RAM before serialization: "));
+  Serial.println(freeRam());
 
-  firebaseClient.print("PATCH ");
+  Serial.println(jsonPayload.capacity());
+  Serial.println(jsonPayload.memoryUsage());
+  Serial.print(F("jsonPayload.overflowed?: "));
+  Serial.println(jsonPayload.overflowed());
+
+  Serial.println(F("Sending JSON patch request..."));
+
+  if (firebaseClient.available() != 0) {
+    Serial.println(F("Firebase client not available."));
+    return;
+  }
+
+  // Calculate content length by serializing to a temporary buffer or using measureJson
+  size_t contentLength = measureJson(jsonPayload);
+
+  firebaseClient.print(F("PATCH "));
   firebaseClient.print(path);
-  // firebaseClient.print("?auth=");
+  // firebaseClient.print(F("?auth="));
   // firebaseClient.print(firebaseAuth);
-  firebaseClient.println(" HTTP/1.1");
-  firebaseClient.println("User-Agent: SSLClientOverEthernet");
-  firebaseClient.print("Host: ");
+  firebaseClient.println(F(" HTTP/1.1"));
+  firebaseClient.println(F("User-Agent: SSLClientOverEthernet"));
+  firebaseClient.print(F("Host: "));
   firebaseClient.println(firebaseHost);
-  firebaseClient.println("Content-Type: application/json");
-  firebaseClient.print("Content-Length: ");
-  firebaseClient.println(payload.length());
-  firebaseClient.println("Connection: keep-alive");
+  firebaseClient.println(F("Content-Type: application/json"));
+  firebaseClient.print(F("Content-Length: "));
+  firebaseClient.println(contentLength);
+  firebaseClient.println(F("Connection: keep-alive"));
   firebaseClient.println();
-  firebaseClient.println(payload);
+  // Serialize JSON directly to the client, effectively sending the payload
+  serializeJson(jsonPayload, firebaseClient);
+  Serial.println(F("Sent JSON patch request directly using serializeJson."));
 
-  // serializeJson(jsonPayload, firebaseClient); // can possibly use this instead of the above code
-
-  // Process the response
-  // processServerResponse();
+  Serial.print(F("Free RAM after serialization: "));
+  Serial.println(freeRam());
 }
 
 /// Checks if the data is a number or a string and creates corresponding JSON payload syntax
@@ -915,20 +1011,28 @@ void requestNanoStatus() {
 }
 
 void disconnectFromServer() {
+  display_freeram();  // Display free RAM before attempting to connect
   endMicros = micros();
   Serial.println();
-  Serial.println("Server disconnected. Stopping client.");
+  Serial.println(F("Server disconnected. Stopping client."));
   firebaseClient.stop();
-  Serial.print("Received ");
+  Serial.print(F("Received "));
   Serial.print(byteCount);
-  Serial.print(" bytes in ");
+  Serial.print(F(" bytes in "));
   float seconds = (float)(endMicros - beginMicros) / 1000000.0;
   Serial.print(seconds, 4);
   float rate = (float)byteCount / seconds / 1000.0;
-  Serial.print(", rate = ");
+  Serial.print(F(", rate = "));
   Serial.print(rate);
-  Serial.print(" kbytes/second");
+  Serial.print(F(" kbytes/second"));
   Serial.println();
 
   setOnBoardLEDColor(255, 0, 0, LED_INTENSITY_HIGH); // red
+
+  // Check if we actually stopped the client and the SSL connection was closed gracefully
+  if (firebaseClient.m_soft_connected(__func__)) {
+    Serial.println(F("Soft check failed: SSL connection was not closed properly."));
+  } else {
+    Serial.println(F("SSL connection closed properly."));
+  }
 }
